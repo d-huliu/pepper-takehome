@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { ArrowLeft, Pencil, Trash2, Package } from "lucide-react";
-import { fetchProduct, deleteProduct } from "@/lib/api";
+import { ArrowLeft, Pencil, Trash2, Package, Check, X } from "lucide-react";
+import { fetchProduct, deleteProduct, updateVariant } from "@/lib/api";
 import type { ProductDetail, Variant } from "@/types";
 import { formatPrice, cn } from "@/lib/utils";
 
@@ -9,6 +9,7 @@ export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [product, setProduct] = useState<ProductDetail | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -19,14 +20,28 @@ export default function ProductDetailPage() {
   }, [id]);
 
   // Delete handler — sends soft-delete request.
-  // FIXME: The button does not disable while the request is in flight,
-  //        so rapid clicks can send multiple DELETE requests.
   const handleDelete = async () => {
     if (!id) return;
     if (!window.confirm("Are you sure you want to delete this product?"))
       return;
-    await deleteProduct(Number(id));
-    navigate("/products");
+    setDeleting(true);
+    try {
+      await deleteProduct(Number(id));
+      navigate("/products");
+    } catch {
+      setDeleting(false);
+    }
+  };
+
+  // Callback for when a variant is updated inline
+  const handleVariantUpdated = (updated: Variant) => {
+    setProduct((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        variants: prev.variants.map((v) => (v.id === updated.id ? updated : v)),
+      };
+    });
   };
 
   if (!product) {
@@ -83,10 +98,11 @@ export default function ProductDetailPage() {
 
           <button
             onClick={handleDelete}
-            className="inline-flex items-center gap-1.5 rounded-md border border-destructive/30 bg-background px-3 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10"
+            disabled={deleting}
+            className="inline-flex items-center gap-1.5 rounded-md border border-destructive/30 bg-background px-3 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Trash2 className="h-4 w-4" />
-            Delete
+            {deleting ? "Deleting…" : "Delete"}
           </button>
         </div>
       </div>
@@ -121,7 +137,7 @@ export default function ProductDetailPage() {
               </thead>
               <tbody className="[&_tr:last-child]:border-0">
                 {product.variants.map((v) => (
-                  <VariantRow key={v.id} variant={v} />
+                  <VariantRow key={v.id} variant={v} onUpdated={handleVariantUpdated} />
                 ))}
               </tbody>
             </table>
@@ -134,45 +150,156 @@ export default function ProductDetailPage() {
 
 /* ------------------------------------------------------------------ */
 
-function VariantRow({ variant }: { variant: Variant }) {
+function VariantRow({
+  variant,
+  onUpdated,
+}: {
+  variant: Variant;
+  onUpdated: (v: Variant) => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [priceCents, setPriceCents] = useState(String(variant.price_cents));
+  const [inventoryCount, setInventoryCount] = useState(String(variant.inventory_count));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
   const lowStock =
     variant.inventory_count > 0 && variant.inventory_count <= 10;
   const outOfStock = variant.inventory_count === 0;
 
+  const startEdit = () => {
+    setPriceCents(String(variant.price_cents));
+    setInventoryCount(String(variant.inventory_count));
+    setError("");
+    setIsEditing(true);
+  };
+
+  const cancelEdit = () => {
+    setIsEditing(false);
+    setError("");
+  };
+
+  const handleSave = async () => {
+    const price = Number(priceCents);
+    const inv = Number(inventoryCount);
+
+    if (isNaN(price) || price < 0) {
+      setError("Price must be >= 0");
+      return;
+    }
+    if (isNaN(inv) || inv < 0) {
+      setError("Inventory must be >= 0");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    try {
+      const res = await updateVariant(variant.id, {
+        price_cents: price,
+        inventory_count: inv,
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error || "Update failed");
+        return;
+      }
+      const updated = await res.json();
+      onUpdated(updated);
+      setIsEditing(false);
+    } catch {
+      setError("Network error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputClass =
+    "h-8 w-24 rounded border border-input bg-background px-2 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-ring";
+
   return (
-    <tr className="border-b transition-colors hover:bg-muted/50">
-      <td className="p-4 align-middle font-mono text-xs">
-        {variant.sku}
-      </td>
-      <td className="p-4 align-middle font-medium">{variant.name}</td>
-      <td className="p-4 text-right align-middle tabular-nums">
-        {formatPrice(variant.price_cents)}
-      </td>
-      <td className="p-4 text-right align-middle tabular-nums">
-        <span
-          className={cn(
-            outOfStock && "text-destructive",
-            lowStock && "text-amber-600"
+    <>
+      <tr className="border-b transition-colors hover:bg-muted/50">
+        <td className="p-4 align-middle font-mono text-xs">
+          {variant.sku}
+        </td>
+        <td className="p-4 align-middle font-medium">{variant.name}</td>
+        <td className="p-4 text-right align-middle tabular-nums">
+          {isEditing ? (
+            <input
+              type="number"
+              min="0"
+              value={priceCents}
+              onChange={(e) => setPriceCents(e.target.value)}
+              className={inputClass}
+              disabled={saving}
+            />
+          ) : (
+            formatPrice(variant.price_cents)
           )}
-        >
-          {variant.inventory_count}
-          {outOfStock && (
-            <Package className="ml-1 inline h-3.5 w-3.5 text-destructive/60" />
+        </td>
+        <td className="p-4 text-right align-middle tabular-nums">
+          {isEditing ? (
+            <input
+              type="number"
+              min="0"
+              value={inventoryCount}
+              onChange={(e) => setInventoryCount(e.target.value)}
+              className={inputClass}
+              disabled={saving}
+            />
+          ) : (
+            <span
+              className={cn(
+                outOfStock && "text-destructive",
+                lowStock && "text-amber-600"
+              )}
+            >
+              {variant.inventory_count}
+              {outOfStock && (
+                <Package className="ml-1 inline h-3.5 w-3.5 text-destructive/60" />
+              )}
+            </span>
           )}
-        </span>
-      </td>
-      <td className="p-4 text-right align-middle">
-        <button
-          className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onClick={() => {
-            // TODO: Open variant edit form / dialog
-            alert("Variant editing is not yet implemented.");
-          }}
-        >
-          <Pencil className="h-3 w-3" />
-          Edit
-        </button>
-      </td>
-    </tr>
+        </td>
+        <td className="p-4 text-right align-middle">
+          {isEditing ? (
+            <div className="inline-flex gap-1">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="inline-flex items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+              >
+                <Check className="h-3 w-3" />
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                onClick={cancelEdit}
+                disabled={saving}
+                className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
+              >
+                <X className="h-3 w-3" />
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={startEdit}
+            >
+              <Pencil className="h-3 w-3" />
+              Edit
+            </button>
+          )}
+        </td>
+      </tr>
+      {error && isEditing && (
+        <tr>
+          <td colSpan={5} className="px-4 pb-2 text-xs text-destructive">
+            {error}
+          </td>
+        </tr>
+      )}
+    </>
   );
 }

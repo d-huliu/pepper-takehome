@@ -10,6 +10,8 @@ export default function ProductsPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [search, setSearch] = useState("");
   const [categoryId, setCategoryId] = useState<number | undefined>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   const hasFilters = Boolean(search || categoryId);
 
@@ -23,10 +25,19 @@ export default function ProductsPage() {
 
   // Fetch products when filters change
   useEffect(() => {
+    setLoading(true);
+    setError("");
     fetchProducts({ search: search || undefined, category_id: categoryId })
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error("Failed to load products");
+        return r.json();
+      })
       .then(setProducts)
-      .catch(() => {});
+      .catch((err) => {
+        setError(err.message || "Something went wrong");
+        setProducts([]);
+      })
+      .finally(() => setLoading(false));
   }, [search, categoryId]);
 
   const clearFilters = () => {
@@ -96,11 +107,22 @@ export default function ProductsPage() {
 
       {/* Result count */}
       <p className="mb-4 text-sm text-muted-foreground">
-        {products.length} result{products.length !== 1 ? "s" : ""} found
+        {loading ? "" : `${products.length} result${products.length !== 1 ? "s" : ""} found`}
       </p>
 
-      {/* Product grid — 5 columns on xl like original CatalogGrid */}
-      {products.length === 0 ? (
+      {/* Error state */}
+      {error && (
+        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      {/* Loading state */}
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+        </div>
+      ) : products.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
           <p className="text-lg font-medium">No products found</p>
           <p className="mt-1 text-sm">Try adjusting your search or filters.</p>

@@ -36,16 +36,65 @@ router.get("/:id", (req, res) => {
  *   "inventory_count": 50
  * }
  */
-router.put("/:id", (_req, res) => {
-  // TODO: Implement variant update
-  // 1. Validate that the variant exists
-  // 2. Validate: price_cents >= 0, inventory_count >= 0, sku is unique (if changed)
-  // 3. Update the variant in the database
-  // 4. Return the updated variant
-  res.status(501).json({
-    error: "Not implemented",
-    hint: "Implement variant update with validation",
-  });
+router.put("/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { name, sku, price_cents, inventory_count } = req.body;
+
+    // Check variant exists
+    const existing = db
+      .prepare("SELECT * FROM variants WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+
+    if (!existing) {
+      return res.status(404).json({ error: "Variant not found" });
+    }
+
+    // Validate price
+    if (price_cents !== undefined && price_cents < 0) {
+      return res.status(400).json({ error: "Price must be >= 0" });
+    }
+
+    // Validate inventory
+    if (inventory_count !== undefined && inventory_count < 0) {
+      return res.status(400).json({ error: "Inventory count must be >= 0" });
+    }
+
+    // Validate SKU uniqueness if changing
+    if (sku !== undefined) {
+      if (!sku || typeof sku !== "string" || sku.trim().length === 0) {
+        return res.status(400).json({ error: "SKU is required" });
+      }
+      const duplicate = db
+        .prepare("SELECT id FROM variants WHERE sku = ? AND id != ?")
+        .get(sku.trim(), id);
+      if (duplicate) {
+        return res.status(400).json({ error: `SKU '${sku.trim()}' already exists` });
+      }
+    }
+
+    db.prepare(
+      `UPDATE variants
+       SET name = COALESCE(?, name),
+           sku = COALESCE(?, sku),
+           price_cents = COALESCE(?, price_cents),
+           inventory_count = COALESCE(?, inventory_count),
+           updated_at = datetime('now')
+       WHERE id = ?`
+    ).run(
+      name ?? null,
+      sku ? sku.trim() : null,
+      price_cents ?? null,
+      inventory_count ?? null,
+      id
+    );
+
+    const updated = db.prepare("SELECT * FROM variants WHERE id = ?").get(id);
+    res.json(updated);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
 });
 
 /**

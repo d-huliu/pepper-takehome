@@ -32,7 +32,7 @@ router.get("/", (req, res) => {
       LEFT JOIN variants v ON v.product_id = p.id
     `;
 
-    const conditions: string[] = [];
+    const conditions: string[] = ["p.deleted_at IS NULL"];
     const params: unknown[] = [];
 
     if (search) {
@@ -54,9 +54,8 @@ router.get("/", (req, res) => {
     const products = db.prepare(query).all(...params);
     res.json(products);
   } catch (err: unknown) {
-    // FIXME: sends plain text error — should this be JSON to match other responses?
     const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).send(message);
+    res.status(500).json({ error: message });
   }
 });
 
@@ -88,7 +87,7 @@ router.get("/:id", (req, res) => {
     res.json({ ...product, variants });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).send(message);
+    res.status(500).json({ error: message });
   }
 });
 
@@ -107,16 +106,103 @@ router.get("/:id", (req, res) => {
  *   ]
  * }
  */
-router.post("/", (_req, res) => {
-  // TODO: Implement product creation
-  // 1. Validate required fields (name is required, variants array must have at least one entry)
-  // 2. Validate each variant (sku required + unique, price_cents >= 0, inventory_count >= 0)
-  // 3. Insert product and variants inside a transaction
-  // 4. Return the created product with its variants
-  res.status(501).json({
-    error: "Not implemented",
-    hint: "Implement product creation with validation and a database transaction",
-  });
+router.post("/", (req, res) => {
+  try {
+    const { name, description, category_id, status, variants } = req.body;
+
+    // Validate product name
+    if (!name || typeof name !== "string" || name.trim().length === 0) {
+      return res.status(400).json({ error: "Product name is required" });
+    }
+
+    // Validate variants array
+    if (!Array.isArray(variants) || variants.length === 0) {
+      return res.status(400).json({ error: "At least one variant is required" });
+    }
+
+    // Validate each variant
+    for (const v of variants) {
+      if (!v.sku || typeof v.sku !== "string" || v.sku.trim().length === 0) {
+        return res.status(400).json({ error: "Variant SKU is required" });
+      }
+      if (v.price_cents !== undefined && v.price_cents < 0) {
+        return res.status(400).json({ error: "Price must be >= 0" });
+      }
+      if (v.inventory_count !== undefined && v.inventory_count < 0) {
+        return res.status(400).json({ error: "Inventory count must be >= 0" });
+      }
+    }
+
+    // Check for duplicate SKUs against existing data
+    for (const v of variants) {
+      const existing = db
+        .prepare("SELECT id FROM variants WHERE sku = ?")
+        .get(v.sku.trim());
+      if (existing) {
+        return res.status(400).json({ error: `SKU '${v.sku.trim()}' already exists` });
+      }
+    }
+
+    // Insert product + variants in a transaction
+    const insertProduct = db.prepare(
+      `INSERT INTO products (name, description, category_id, status)
+       VALUES (?, ?, ?, ?)`
+    );
+    const insertVariant = db.prepare(
+      `INSERT INTO variants (product_id, sku, name, price_cents, inventory_count)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+
+    const result = db.transaction(() => {
+      const productResult = insertProduct.run(
+        name.trim(),
+        description ?? null,
+        category_id ?? null,
+        status ?? "active"
+      );
+      const productId = Number(productResult.lastInsertRowid);
+
+      const createdVariants = [];
+      for (const v of variants) {
+        const variantResult = insertVariant.run(
+          productId,
+          v.sku.trim(),
+          v.name ?? "Default",
+          v.price_cents ?? 0,
+          v.inventory_count ?? 0
+        );
+        createdVariants.push({
+          id: Number(variantResult.lastInsertRowid),
+          product_id: productId,
+          sku: v.sku.trim(),
+          name: v.name ?? "Default",
+          price_cents: v.price_cents ?? 0,
+          inventory_count: v.inventory_count ?? 0,
+        });
+      }
+
+      return { productId, createdVariants };
+    })();
+
+    // Fetch the full product to return
+    const product = db
+      .prepare(
+        `SELECT p.*, c.name AS category_name
+         FROM products p
+         LEFT JOIN categories c ON p.category_id = c.id
+         WHERE p.id = ?`
+      )
+      .get(result.productId) as Record<string, unknown>;
+
+    const productVariants = db
+      .prepare("SELECT * FROM variants WHERE product_id = ? ORDER BY created_at ASC")
+      .all(result.productId);
+
+    res.status(201).json({ ...product, variants: productVariants });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
 });
 
 /**
@@ -158,7 +244,7 @@ router.put("/:id", (req, res) => {
     res.json(updated);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).send(message);
+    res.status(500).json({ error: message });
   }
 });
 
@@ -174,8 +260,7 @@ router.delete("/:id", (req, res) => {
     .get(id) as Record<string, unknown> | undefined;
 
   if (!product) {
-    // FIXME: Returns plain text — not JSON like other error responses
-    return res.status(404).send("Product not found");
+    return res.status(404).json({ error: "Product not found" });
   }
 
   db.prepare(
